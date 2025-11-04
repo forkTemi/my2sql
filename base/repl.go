@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	
-	"github.com/siddontang/go-log/log"
+
 	"github.com/go-mysql-org/go-mysql/mysql"
-        "github.com/go-mysql-org/go-mysql/replication"
+	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/siddontang/go-log/log"
 )
 
 func ParserAllBinEventsFromRepl(cfg *ConfCmd) {
@@ -45,8 +45,8 @@ func NewReplBinlogStreamer(cfg *ConfCmd) *replication.BinlogStreamer {
 
 func SendBinlogEventRepl(cfg *ConfCmd) {
 	var (
-		err 		error
-		ev 			*replication.BinlogEvent
+		err           error
+		ev            *replication.BinlogEvent
 		chkRe         int
 		currentBinlog string = cfg.StartFile
 		binEventIdx   uint64 = 0
@@ -64,16 +64,17 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 
 		//justStart   bool = true
 		//orgSqlEvent *replication.RowsQueryEvent
+		currentGtid string = "" // 新增：记录当前事务的 GTID
 	)
 	for {
 
 		if cfg.OutputToScreen {
 			ev, err = cfg.BinlogStreamer.GetEvent(context.Background())
 			if err != nil {
-				log.Fatalf(fmt.Sprintf("error to get binlog event"))
+				log.Fatalf("error to get binlog event")
 				break
 			}
-		} else{
+		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), EventTimeout)
 			ev, err = cfg.BinlogStreamer.GetEvent(ctx)
 			cancel()
@@ -83,21 +84,52 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 			} else if err == context.DeadlineExceeded {
 				log.Infof("deadline exceeded.")
 				break
-			} else if err !=nil {
-				log.Fatalf(fmt.Sprintf("error to get binlog event %v",err))
+			} else if err != nil {
+				log.Fatalf(fmt.Sprintf("error to get binlog event %v", err))
 				break
 			}
 		}
 
-		if ev.Header.EventType == replication.TABLE_MAP_EVENT {
-			tbMapPos = ev.Header.LogPos - ev.Header.EventSize 
-			// avoid mysqlbing mask the row event as unknown table row event
+		// if ev.Header.EventType == replication.TABLE_MAP_EVENT {
+		// 	tbMapPos = ev.Header.LogPos - ev.Header.EventSize
+		// 	// avoid mysqlbing mask the row event as unknown table row event
+		// }
+
+		// 解析 GTID 事件，更新 currentGtid
+		switch ev.Header.EventType {
+		case replication.GTID_EVENT:
+			// 类型断言为 GTIDEvent
+			if gtidEvent, ok := ev.Event.(*replication.GTIDEvent); ok {
+				sid := gtidEvent.SID // [16]byte
+				// 手动格式化为 UUID 字符串
+				uuidStr := fmt.Sprintf("%x-%x-%x-%x-%x",
+					sid[0:4], sid[4:6], sid[6:8], sid[8:10], sid[10:16],
+				)
+				currentGtid = fmt.Sprintf("%s:%d", uuidStr, gtidEvent.GNO)
+				// fmt.Println(currentGtid)
+			}
+
+		case replication.ANONYMOUS_GTID_EVENT:
+			currentGtid = "ANONYMOUS"
+
+		case replication.ROTATE_EVENT:
+			// 切换 binlog 文件
+			rotateEvent := ev.Event.(*replication.RotateEvent)
+			currentBinlog = string(rotateEvent.NextLogName)
+
+		case replication.TABLE_MAP_EVENT:
+			tbMapPos = ev.Header.LogPos - ev.Header.EventSize
 		}
 		ev.RawData = []byte{} // we donnot need raw data
 
-		oneMyEvent := &MyBinEvent{MyPos: mysql.Position{Name: currentBinlog, Pos: ev.Header.LogPos}, StartPos: tbMapPos}
+		oneMyEvent := &MyBinEvent{
+			MyPos:       mysql.Position{Name: currentBinlog, Pos: ev.Header.LogPos},
+			StartPos:    tbMapPos,
+			IfRowsEvent: false,
+			GtidStr:     currentGtid, // 赋值 GTID
+		}
 		chkRe = oneMyEvent.CheckBinEvent(cfg, ev, &currentBinlog)
-		
+
 		if chkRe == C_reContinue {
 			continue
 		} else if chkRe == C_reBreak {
@@ -115,7 +147,7 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 		//	log.Fatalf(fmt.Sprintf("Unsupported table name %s.%s contains special character '#'", db, tb))
 		//	break
 		//}
-	
+
 		if sqlType == "query" {
 			sqlLower = strings.ToLower(sql)
 			if sqlLower == "begin" {
@@ -125,7 +157,7 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 				trxStatus = C_trxCommit
 			} else if sqlLower == "rollback" {
 				trxStatus = C_trxRollback
-			} else if oneMyEvent.QuerySql != nil  {
+			} else if oneMyEvent.QuerySql != nil {
 				trxStatus = C_trxProcess
 				rowCnt = 1
 			}
@@ -139,12 +171,12 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 			if oneMyEvent.IfRowsEvent {
 
 				tbKey := GetAbsTableName(string(oneMyEvent.BinEvent.Table.Schema),
-						string(oneMyEvent.BinEvent.Table.Table))
+					string(oneMyEvent.BinEvent.Table.Table))
 				_, err = G_TablesColumnsInfo.GetTableInfoJson(string(oneMyEvent.BinEvent.Table.Schema),
-						string(oneMyEvent.BinEvent.Table.Table))
+					string(oneMyEvent.BinEvent.Table.Table))
 				if err != nil {
 					log.Fatalf(fmt.Sprintf("no table struct found for %s, it maybe dropped, skip it. RowsEvent position:%s",
-							tbKey, oneMyEvent.MyPos.String()))
+						tbKey, oneMyEvent.MyPos.String()))
 				}
 				ifSendEvent = true
 			}
@@ -157,9 +189,9 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 				oneMyEvent.TrxStatus = trxStatus
 				cfg.EventChan <- *oneMyEvent
 			}
-		} 
-		
-		//output analysis result whatever the WorkType is	
+		}
+
+		//output analysis result whatever the WorkType is
 		if sqlType != "" {
 			if sqlType == "query" {
 				cfg.StatChan <- BinEventStats{Timestamp: ev.Header.Timestamp, Binlog: currentBinlog, StartPos: ev.Header.LogPos - ev.Header.EventSize, StopPos: ev.Header.LogPos,
@@ -169,6 +201,6 @@ func SendBinlogEventRepl(cfg *ConfCmd) {
 					Database: db, Table: tb, QuerySql: sql, RowCnt: rowCnt, QueryType: sqlType}
 			}
 		}
-		
+
 	}
 }

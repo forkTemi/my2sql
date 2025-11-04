@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	SQL "my2sql/sqlbuilder"
 	constvar "my2sql/constvar"
-	"github.com/siddontang/go-log/log"
+	SQL "my2sql/sqlbuilder"
 
+	"github.com/siddontang/go-log/log"
 )
 
 type ExtraSqlInfoOfPrint struct {
@@ -25,6 +25,7 @@ type ExtraSqlInfoOfPrint struct {
 	datetime  string
 	trxIndex  uint64
 	trxStatus int
+	gtid      string `json:"gtid"` // 新增 gtid信息
 }
 
 type ForwardRollbackSqlOfPrint struct {
@@ -97,7 +98,7 @@ func GenForwardRollbackSqlFromBinEvent(i uint, cfg *ConfCmd, wg *sync.WaitGroup)
 
 				}
 			}
-			
+
 			if colType == "blob" {
 				// text is stored as blob
 				if strings.Contains(strings.ToLower(tbInfo.Columns[ci].FieldType), "text") {
@@ -145,21 +146,21 @@ func GenForwardRollbackSqlFromBinEvent(i uint, cfg *ConfCmd, wg *sync.WaitGroup)
 
 		if ev.SqlType == "insert" {
 			if ifRollback {
-				sqlArr = GenDeleteSqlsForOneRowsEventRollbackInsert(posStr, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, cfg.SqlTblPrefixDb)
+				sqlArr = GenDeleteSqlsForOneRowsEventRollbackInsert(ev.GtidStr, GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE), posStr, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, cfg.SqlTblPrefixDb)
 			} else {
-				sqlArr = GenInsertSqlsForOneRowsEvent(posStr, ev.BinEvent, colsDef, 1, false, cfg.SqlTblPrefixDb, ifIgnorePrimary, primaryKeyIdx)
+				sqlArr = GenInsertSqlsForOneRowsEvent(ev.GtidStr, GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE), posStr, ev.BinEvent, colsDef, 1, false, cfg.SqlTblPrefixDb, ifIgnorePrimary, primaryKeyIdx)
 			}
 		} else if ev.SqlType == "delete" {
 			if ifRollback {
-				sqlArr = GenInsertSqlsForOneRowsEventRollbackDelete(posStr, ev.BinEvent, colsDef, 1, cfg.SqlTblPrefixDb)
+				sqlArr = GenInsertSqlsForOneRowsEventRollbackDelete(ev.GtidStr, GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE), posStr, ev.BinEvent, colsDef, 1, cfg.SqlTblPrefixDb)
 			} else {
-				sqlArr = GenDeleteSqlsForOneRowsEvent(posStr, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, false, cfg.SqlTblPrefixDb)
+				sqlArr = GenDeleteSqlsForOneRowsEvent(ev.GtidStr, GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE), posStr, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, false, cfg.SqlTblPrefixDb)
 			}
 		} else if ev.SqlType == "update" {
 			if ifRollback {
-				sqlArr = GenUpdateSqlsForOneRowsEvent(posStr, colsTypeNameFromMysql, colsTypeName, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, true, cfg.SqlTblPrefixDb)
+				sqlArr = GenUpdateSqlsForOneRowsEvent(ev.GtidStr, GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE), posStr, colsTypeNameFromMysql, colsTypeName, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, true, cfg.SqlTblPrefixDb)
 			} else {
-				sqlArr = GenUpdateSqlsForOneRowsEvent(posStr, colsTypeNameFromMysql, colsTypeName, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, false, cfg.SqlTblPrefixDb)
+				sqlArr = GenUpdateSqlsForOneRowsEvent(ev.GtidStr, GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE), posStr, colsTypeNameFromMysql, colsTypeName, ev.BinEvent, colsDef, uniqueKeyIdx, cfg.FullColumns, false, cfg.SqlTblPrefixDb)
 			}
 		} else {
 			fmt.Println("unsupported query type %s to generate 2sql|rollback sql, it should one of insert|update|delete. %s", ev.SqlType, ev.MyPos.String())
@@ -168,7 +169,7 @@ func GenForwardRollbackSqlFromBinEvent(i uint, cfg *ConfCmd, wg *sync.WaitGroup)
 		currentSqlForPrint = ForwardRollbackSqlOfPrint{sqls: sqlArr,
 			sqlInfo: ExtraSqlInfoOfPrint{schema: db, table: tb, binlog: ev.MyPos.Name, startpos: ev.StartPos, endpos: ev.MyPos.Pos,
 				datetime: GetDatetimeStr(int64(ev.Timestamp), int64(0), constvar.DATETIME_FORMAT_NOSPACE),
-				trxIndex: ev.TrxIndex, trxStatus: ev.TrxStatus}}
+				trxIndex: ev.TrxIndex, trxStatus: ev.TrxStatus, gtid: ev.GtidStr}}
 
 		for {
 			//fmt.Println("in thread", i)
@@ -176,6 +177,7 @@ func GenForwardRollbackSqlFromBinEvent(i uint, cfg *ConfCmd, wg *sync.WaitGroup)
 			//fmt.Println("handing index:", G_HandlingBinEventIndex.EventIdx, "binevent index:", ev.EventIdx)
 			if G_HandlingBinEventIndex.EventIdx == ev.EventIdx {
 				if cfg.OutputToScreen {
+					cfg.SqlChan <- currentSqlForPrint
 					for _, sql := range currentSqlForPrint.sqls {
 						fmt.Println(sql)
 					}
@@ -320,8 +322,8 @@ func GetForwardRollbackSqlFileName(schema string, table string, filePerTable boo
 
 func GetForwardRollbackContentLineWithExtra(sq ForwardRollbackSqlOfPrint, ifExtra bool) string {
 	if ifExtra {
-		return fmt.Sprintf("# datetime=%s database=%s table=%s binlog=%s startpos=%d stoppos=%d\n%s;\n",
-			sq.sqlInfo.datetime, sq.sqlInfo.schema, sq.sqlInfo.table, sq.sqlInfo.binlog, sq.sqlInfo.startpos,
+		return fmt.Sprintf("# gtid=%s datetime=%s database=%s table=%s binlog=%s startpos=%d stoppos=%d\n%s;\n",
+			sq.sqlInfo.gtid, sq.sqlInfo.datetime, sq.sqlInfo.schema, sq.sqlInfo.table, sq.sqlInfo.binlog, sq.sqlInfo.startpos,
 			sq.sqlInfo.endpos, strings.Join(sq.sqls, ";\n"))
 	} else {
 

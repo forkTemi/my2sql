@@ -1,14 +1,15 @@
 package base
 
 import (
-	"sync"
 	"path/filepath"
+	"sync"
 
 	"my2sql/dsql"
 	toolkits "my2sql/toolkits"
-	"github.com/siddontang/go-log/log"
+
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/siddontang/go-log/log"
 )
 
 type BinEventHandlingIndx struct {
@@ -33,6 +34,8 @@ type MyBinEvent struct {
 	TrxStatus   int           // 0:begin, 1: commit, 2: rollback, -1: in_progress
 	QuerySql    *dsql.SqlInfo // for ddl and binlog which is not row format
 	OrgSql      string        // for ddl and binlog which is not row format
+	GtidStr     string        // 新增：存储 GTID 字符串
+
 }
 
 func (this *MyBinEvent) CheckBinEvent(cfg *ConfCmd, ev *replication.BinlogEvent, currentBinlog *string) int {
@@ -159,8 +162,7 @@ BinEventCheck:
 
 }
 
-
-func CheckBinHeaderCondition(cfg *ConfCmd, header *replication.EventHeader, currentBinlog string) (int) {
+func CheckBinHeaderCondition(cfg *ConfCmd, header *replication.EventHeader, currentBinlog string) int {
 	// process: 0, continue: 1, break: 2
 
 	myPos := mysql.Position{Name: currentBinlog, Pos: header.LogPos}
@@ -178,7 +180,7 @@ func CheckBinHeaderCondition(cfg *ConfCmd, header *replication.EventHeader, curr
 			return C_reBreak
 		}
 	}
-	
+
 	//fmt.Println(cfg.StartDatetime, cfg.StopDatetime, header.Timestamp)
 	if cfg.IfSetStartDateTime {
 

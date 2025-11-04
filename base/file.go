@@ -1,31 +1,29 @@
 package base
 
 import (
-	"fmt"
-	"os"
-	"io"
 	"bytes"
-	"strings"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/juju/errors"
 	toolkits "my2sql/toolkits"
-	"github.com/siddontang/go-log/log"
-	"github.com/go-mysql-org/go-mysql/mysql"
-        "github.com/go-mysql-org/go-mysql/replication"
-)
 
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/juju/errors"
+	"github.com/siddontang/go-log/log"
+)
 
 var (
 	fileBinEventHandlingIndex uint64 = 0
 	fileTrxIndex              uint64 = 0
 )
 
-
 type BinFileParser struct {
 	Parser *replication.BinlogParser
 }
-
 
 func (this BinFileParser) MyParseAllBinlogFiles(cfg *ConfCmd) {
 	defer cfg.CloseChan()
@@ -103,7 +101,6 @@ func (this BinFileParser) MyParseOneBinlogFile(cfg *ConfCmd, name string) (int, 
 	return this.MyParseReader(cfg, f, &binlog)
 }
 
-
 func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *string) (int, error) {
 	// process: 0, continue: 1, break: 2, EOF: 3
 	var (
@@ -117,6 +114,8 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 		trxStatus   int    = 0
 		sqlLower    string = ""
 		tbMapPos    uint32 = 0
+		currentGtid string = "" // 新增：记录当前 GTID
+
 	)
 
 	for {
@@ -129,11 +128,10 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 			return C_reBreak, errors.Trace(err)
 		}
 
-
 		var h *replication.EventHeader
 		h, err = this.Parser.ParseHeader(headBuf)
 		if err != nil {
-			log.Error(fmt.Sprintf("fail to parse binlog event header of %s %v" , *binlog, err))
+			log.Error(fmt.Sprintf("fail to parse binlog event header of %s %v", *binlog, err))
 			return C_reBreak, errors.Trace(err)
 		}
 		//fmt.Printf("parsing %s %d %s\n", *binlog, h.LogPos, GetDatetimeStr(int64(h.Timestamp), int64(0), DATETIME_FORMAT))
@@ -151,7 +149,6 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 			return C_reBreak, err
 		}
 
-
 		//h.Dump(os.Stdout)
 
 		data := buf.Bytes()
@@ -168,14 +165,39 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 		}
 
 		var e replication.Event
+		// if h.EventType == replication.TABLE_MAP_EVENT {
+		// 	tbMapPos = h.LogPos - h.EventSize // avoid mysqlbing mask the row event as unknown table row event
+		// }
 		e, err = this.Parser.ParseEvent(h, data, rawData)
 		if err != nil {
-			log.Error(fmt.Sprintf("fail to parse binlog event body of %s %v",*binlog, err))
+			log.Error(fmt.Sprintf("fail to parse binlog event body of %s %v", *binlog, err))
 			return C_reBreak, errors.Trace(err)
 		}
-		if h.EventType == replication.TABLE_MAP_EVENT {
-			tbMapPos = h.LogPos - h.EventSize // avoid mysqlbing mask the row event as unknown table row event
+
+		// === 新增：解析 GTID 事件 ===
+		switch h.EventType {
+		case replication.GTID_EVENT:
+			if gtidEvent, ok := e.(*replication.GTIDEvent); ok {
+				sid := gtidEvent.SID
+				uuidStr := fmt.Sprintf("%x-%x-%x-%x-%x",
+					sid[0:4], sid[4:6], sid[6:8], sid[8:10], sid[10:16],
+				)
+				currentGtid = fmt.Sprintf("%s:%d", uuidStr, gtidEvent.GNO)
+			}
+
+		case replication.ANONYMOUS_GTID_EVENT:
+			currentGtid = "ANONYMOUS"
+
+		case replication.ROTATE_EVENT:
+			// 更新当前 binlog 文件名
+			if rotateEvent, ok := e.(*replication.RotateEvent); ok {
+				*binlog = string(rotateEvent.NextLogName)
+			}
+
+		case replication.TABLE_MAP_EVENT:
+			tbMapPos = h.LogPos - h.EventSize
 		}
+		// === GTID 解析结束 ===
 
 		//e.Dump(os.Stdout)
 		//can not advance this check, because we need to parse table map event or table may not found. Also we must seek ahead the read file position
@@ -190,8 +212,11 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 
 		//binEvent := &replication.BinlogEvent{RawData: rawData, Header: h, Event: e}
 		binEvent := &replication.BinlogEvent{Header: h, Event: e} // we donnot need raw data
-		oneMyEvent := &MyBinEvent{MyPos: mysql.Position{Name: *binlog, Pos: h.LogPos},
-			StartPos: tbMapPos}
+		oneMyEvent := &MyBinEvent{
+			MyPos:    mysql.Position{Name: *binlog, Pos: h.LogPos},
+			StartPos: tbMapPos,
+			GtidStr:  currentGtid,
+		}
 		//StartPos: h.LogPos - h.EventSize}
 		chRe = oneMyEvent.CheckBinEvent(cfg, binEvent, binlog)
 		if chRe == C_reBreak {
@@ -200,7 +225,7 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 			continue
 		} else if chRe == C_reFileEnd {
 			return C_reFileEnd, nil
-		} 
+		}
 
 		db, tb, sqlType, sql, rowCnt = GetDbTbAndQueryAndRowCntFromBinevent(binEvent)
 		if sqlType == "query" {
@@ -220,18 +245,17 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 			trxStatus = C_trxProcess
 		}
 
-
 		if cfg.WorkType != "stats" {
 			ifSendEvent := false
 			if oneMyEvent.IfRowsEvent {
 
 				tbKey := GetAbsTableName(string(oneMyEvent.BinEvent.Table.Schema),
-						string(oneMyEvent.BinEvent.Table.Table))
+					string(oneMyEvent.BinEvent.Table.Table))
 				_, err = G_TablesColumnsInfo.GetTableInfoJson(string(oneMyEvent.BinEvent.Table.Schema),
-						string(oneMyEvent.BinEvent.Table.Table))
+					string(oneMyEvent.BinEvent.Table.Table))
 				if err != nil {
 					log.Fatalf(fmt.Sprintf("no table struct found for %s, it maybe dropped, skip it. RowsEvent position:%s",
-							tbKey, oneMyEvent.MyPos.String()))
+						tbKey, oneMyEvent.MyPos.String()))
 				}
 				ifSendEvent = true
 			}
@@ -246,10 +270,9 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 				cfg.EventChan <- *oneMyEvent
 			}
 
+		}
 
-		} 
-
-		//output analysis result whatever the WorkType is	
+		//output analysis result whatever the WorkType is
 		if sqlType != "" {
 			if sqlType == "query" {
 				cfg.StatChan <- BinEventStats{Timestamp: h.Timestamp, Binlog: *binlog, StartPos: h.LogPos - h.EventSize, StopPos: h.LogPos,
@@ -260,9 +283,7 @@ func (this BinFileParser) MyParseReader(cfg *ConfCmd, r io.Reader, binlog *strin
 			}
 		}
 
-
 	}
 
 	return C_reFileEnd, nil
 }
-

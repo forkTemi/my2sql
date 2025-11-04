@@ -7,3 +7,6 @@ main
 .vendor/go19
 /bin
 /build
+.vscode/
+*.txt
+*.sql

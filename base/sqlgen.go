@@ -2,12 +2,13 @@ package base
 
 import (
 	"fmt"
-	"github.com/siddontang/go-log/log"
-	"github.com/go-mysql-org/go-mysql/mysql"
-        "github.com/go-mysql-org/go-mysql/replication"
 	SQL "my2sql/sqlbuilder"
 	toolkits "my2sql/toolkits"
 	"strings"
+
+	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/siddontang/go-log/log"
 )
 
 var G_Bytes_Column_Types []string = []string{"blob", "json", "geometry", C_unknownColType}
@@ -134,7 +135,7 @@ func GetMysqlDataTypeNameAndSqlColumn(tpDef string, colName string, tp byte, met
 	}
 }
 
-func GenInsertSqlsForOneRowsEvent(posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, rowsPerSql int, ifRollback bool, ifprefixDb bool, ifIgnorePrimary bool, primaryIdx []int) []string {
+func GenInsertSqlsForOneRowsEvent(gtid string, datetime, posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, rowsPerSql int, ifRollback bool, ifprefixDb bool, ifIgnorePrimary bool, primaryIdx []int) []string {
 	var (
 		insertSql  SQL.InsertStatement
 		oneSql     string
@@ -170,7 +171,7 @@ func GenInsertSqlsForOneRowsEvent(posStr string, rEv *replication.RowsEvent, col
 			log.Fatalf(fmt.Sprintf("Fail to generate %s sql for %s %s \n\terror: %v\n\trows data:%v",
 				sqlType, GetAbsTableName(schema, table), posStr, err, rEv.Rows[i:endIndex]))
 		} else {
-			sqlArr = append(sqlArr, oneSql)
+			sqlArr = append(sqlArr, datetime+"#"+gtid+"#"+posStr+"#"+oneSql)
 		}
 
 	}
@@ -230,11 +231,11 @@ func GenInsertSqlForRows(rows [][]interface{}, insertSql SQL.InsertStatement, sc
 
 }
 
-func GenDeleteSqlsForOneRowsEventRollbackInsert(posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, uniKey []int, ifFullImage bool, ifprefixDb bool) []string {
-	return GenDeleteSqlsForOneRowsEvent(posStr, rEv, colDefs, uniKey, ifFullImage, true, ifprefixDb)
+func GenDeleteSqlsForOneRowsEventRollbackInsert(gtid string, datetime string, posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, uniKey []int, ifFullImage bool, ifprefixDb bool) []string {
+	return GenDeleteSqlsForOneRowsEvent(gtid, datetime, posStr, rEv, colDefs, uniKey, ifFullImage, true, ifprefixDb)
 }
 
-func GenDeleteSqlsForOneRowsEvent(posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, uniKey []int, ifFullImage bool, ifRollback bool, ifprefixDb bool) []string {
+func GenDeleteSqlsForOneRowsEvent(gtid string, datetime string, posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, uniKey []int, ifFullImage bool, ifRollback bool, ifprefixDb bool) []string {
 	rowCnt := len(rEv.Rows)
 	sqlArr := make([]string, rowCnt)
 	//var sqlArr []string
@@ -260,7 +261,7 @@ func GenDeleteSqlsForOneRowsEvent(posStr string, rEv *replication.RowsEvent, col
 				sqlType, GetAbsTableName(schema, table), posStr, err, row))
 			//continue
 		}
-		sqlArr[i] = sql
+		sqlArr[i] = datetime + "#" + gtid + "#" + posStr + "#" + sql
 		//sqlArr = append(sqlArr, sql)
 	}
 	return sqlArr
@@ -281,11 +282,11 @@ func GenEqualConditions(row []interface{}, colDefs []SQL.NonAliasColumn, uniKey 
 	return expArrs
 }
 
-func GenInsertSqlsForOneRowsEventRollbackDelete(posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, rowsPerSql int, ifprefixDb bool) []string {
-	return GenInsertSqlsForOneRowsEvent(posStr, rEv, colDefs, rowsPerSql, true, ifprefixDb, false, []int{})
+func GenInsertSqlsForOneRowsEventRollbackDelete(gtid string, datetime string, posStr string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, rowsPerSql int, ifprefixDb bool) []string {
+	return GenInsertSqlsForOneRowsEvent(gtid, datetime, posStr, rEv, colDefs, rowsPerSql, true, ifprefixDb, false, []int{})
 }
 
-func GenUpdateSqlsForOneRowsEvent(posStr string, colsTypeNameFromMysql []string, colsTypeName []string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, uniKey []int, ifFullImage bool, ifRollback bool, ifprefixDb bool) []string {
+func GenUpdateSqlsForOneRowsEvent(gtid string, datetime string, posStr string, colsTypeNameFromMysql []string, colsTypeName []string, rEv *replication.RowsEvent, colDefs []SQL.NonAliasColumn, uniKey []int, ifFullImage bool, ifRollback bool, ifprefixDb bool) []string {
 	//colsTypeNameFromMysql: for text type, which is stored as blob
 	var (
 		rowCnt      int    = len(rEv.Rows)
@@ -324,7 +325,7 @@ func GenUpdateSqlsForOneRowsEvent(posStr string, colsTypeNameFromMysql []string,
 			log.Fatalf(fmt.Sprintf("Fail to generate %s sql for %s %s \n\terror: %s\n\trows data:%v\n%v",
 				sqlType, GetAbsTableName(schema, table), posStr, err, rEv.Rows[i], rEv.Rows[i+1]))
 		} else {
-			sqlArr = append(sqlArr, sql)
+			sqlArr = append(sqlArr, datetime+"#"+gtid+"#"+posStr+"#"+sql)
 		}
 
 	}
